@@ -1,10 +1,10 @@
 import os
 import logging
+import asyncio
 from collections import defaultdict, deque
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("telegram-groq-bot")
@@ -29,8 +29,8 @@ app = FastAPI(title="Telegram Groq AI Bot")
 histories = defaultdict(lambda: deque(maxlen=MAX_HISTORY_MESSAGES))
 
 
-async def telegram_call(method: str, payload: dict):
-    async with httpx.AsyncClient(timeout=30) as client:
+async def telegram_call(method: str, payload: dict, timeout: float = 30):
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(f"{TELEGRAM_API}/{method}", json=payload)
         response.raise_for_status()
         data = response.json()
@@ -212,21 +212,52 @@ async def handle_update(update: dict):
         await send_message(chat_id, "Произошла ошибка при обработке. Попробуй ещё раз.")
 
 
+polling_task: asyncio.Task | None = None
+
+
+async def poll_telegram():
+    """Получает обновления Telegram через Long Polling."""
+    offset = None
+    log.info("Telegram long polling started.")
+    while True:
+        try:
+            payload = {"timeout": 25, "allowed_updates": ["message", "edited_message"]}
+            if offset is not None:
+                payload["offset"] = offset
+            updates = await telegram_call("getUpdates", payload, timeout=35)
+            for update in updates or []:
+                try:
+                    await handle_update(update)
+                except Exception:
+                    log.exception("Failed to process Telegram update %s", update.get("update_id"))
+                offset = update["update_id"] + 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Telegram polling failed; retrying in 5 seconds.")
+            await asyncio.sleep(5)
+
+
 @app.on_event("startup")
-async def configure_webhook():
-    if not RENDER_EXTERNAL_URL:
-        log.error("WEBHOOK_URL and RENDER_EXTERNAL_URL are both missing; webhook was not configured.")
-        return
-
-    payload = {"url": f"{RENDER_EXTERNAL_URL}/telegram/webhook"}
-    if WEBHOOK_SECRET:
-        payload["secret_token"] = WEBHOOK_SECRET
-
+async def start_polling():
+    global polling_task
     try:
-        await telegram_call("setWebhook", payload)
-        log.info("Telegram webhook configured.")
+        # Long Polling нельзя использовать, пока у бота установлен Webhook.
+        await telegram_call("deleteWebhook", {"drop_pending_updates": False})
+        log.info("Telegram webhook removed; switching to long polling.")
+        polling_task = asyncio.create_task(poll_telegram())
     except Exception:
-        log.exception("Could not configure Telegram webhook")
+        log.exception("Could not initialize Telegram long polling.")
+
+
+@app.on_event("shutdown")
+async def stop_polling():
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except asyncio.CancelledError:
+            pass
 
 
 @app.get("/")
@@ -239,15 +270,3 @@ async def health():
     return {"status": "healthy"}
 
 
-@app.post("/telegram/webhook")
-async def telegram_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
-):
-    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid webhook secret")
-
-    update = await request.json()
-    background_tasks.add_task(handle_update, update)
-    return JSONResponse({"ok": True})
