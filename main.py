@@ -1,4 +1,86 @@
 import os
+
+import base64
+import hashlib
+import hmac
+import json
+import time
+from urllib.parse import parse_qsl
+from fastapi import Header, HTTPException, Depends
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+def verify_telegram_init_data(init_data: str) -> int:
+    if not init_data:
+        raise HTTPException(status_code=401, detail="Открой приложение из Telegram.")
+    values = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = values.pop("hash", None)
+    if not received_hash:
+        raise HTTPException(status_code=401, detail="Не удалось проверить Telegram.")
+    try:
+        if not values.get("auth_date") or abs(time.time() - int(values["auth_date"])) > 86400:
+            raise HTTPException(status_code=401, detail="Сессия устарела. Открой приложение заново.")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Некорректная сессия Telegram.")
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(values.items()))
+    secret_key = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
+    calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated, received_hash):
+        raise HTTPException(status_code=401, detail="Проверка Telegram не пройдена.")
+    try:
+        return int(json.loads(values["user"])["id"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Не удалось определить пользователя.")
+
+
+def miniapp_user(x_telegram_init_data: str = Header(default="")) -> int:
+    return verify_telegram_init_data(x_telegram_init_data)
+
+
+class MiniChatRequest(BaseModel):
+    text: str = ""
+    image_base64: str | None = None
+    mime_type: str = "image/jpeg"
+
+
+@app.get("/app")
+async def miniapp():
+    return FileResponse("static/index.html")
+
+
+@app.post("/api/miniapp/chat")
+async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_user)):
+    text = payload.text.strip()
+    if payload.image_base64:
+        try:
+            image_bytes = base64.b64decode(payload.image_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
+        if len(image_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
+        answer = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type)
+        model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+    else:
+        if not text:
+            raise HTTPException(status_code=400, detail="Напиши сообщение.")
+        answer = await ask_groq(user_id, text)
+        model = GROQ_MODEL
+    return {"answer": answer, "limits": rate_limits.get(model, {})}
+
+
+@app.post("/api/miniapp/limits")
+async def miniapp_limits(user_id: int = Depends(miniapp_user)):
+    return {"limits": rate_limits.get(GROQ_MODEL, {})}
+
+
+@app.post("/api/miniapp/clear")
+async def miniapp_clear(user_id: int = Depends(miniapp_user)):
+    histories.pop(user_id, None)
+    return {"ok": True}
 import logging
 import asyncio
 from collections import defaultdict, deque
