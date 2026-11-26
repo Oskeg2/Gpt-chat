@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#080d1d"><title>AI Assistant</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#080d1d;--panel:#111a31;--line:#263657;--cyan:#55dcff;--blue:#4778ff;--muted:#9aaaca}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% -15%,#233c78 0,transparent 48%),var(--bg);color:#f5f8ff;font:15px system-ui,-apple-system,sans-serif;min-height:100vh}
+.app{max-width:620px;margin:auto;padding:18px 16px 24px}.top{display:flex;align-items:center;justify-content:space-between;margin:10px 0 22px}
+.brand{display:flex;gap:11px;align-items:center}.logo{width:46px;height:46px;border-radius:16px;background:linear-gradient(145deg,#5be7ff,#4567ff);display:grid;place-items:center;font-size:24px;box-shadow:0 0 28px #3c8dff77;animation:float 3s ease-in-out infinite}
+h1{font-size:18px;margin:0}.sub{font-size:12px;color:var(--muted);margin-top:3px}.online{font-size:11px;color:#7df6c2;background:#123a36;padding:7px 10px;border-radius:99px}
+.hero{border:1px solid #4568ad66;border-radius:25px;padding:22px;background:linear-gradient(135deg,#172d59,#111a31 70%);position:relative;overflow:hidden;box-shadow:0 18px 50px #0005;animation:rise .6s both}
+.hero:after{content:"";position:absolute;width:180px;height:180px;border-radius:50%;right:-65px;top:-75px;background:#5ce4ff20;filter:blur(2px)}
+.eyebrow{color:var(--cyan);font-size:11px;letter-spacing:2px;text-transform:uppercase}.hero h2{font-size:27px;line-height:1.12;margin:10px 0}.hero p{color:#bac9e8;line-height:1.5;margin:0;font-size:13px}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}.stat,.panel{background:#111a31d9;border:1px solid var(--line);border-radius:18px;padding:15px}.stat small{color:var(--muted)}.stat strong{display:block;font-size:19px;margin-top:5px}
+.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}.tab{border:1px solid var(--line);background:#111a31;color:#aebddd;border-radius:14px;padding:11px 5px;font-weight:600}.tab.active{background:#1b3c76;border-color:#4a9cff;color:white;box-shadow:0 0 20px #398cff30}
+.panel{min-height:270px;animation:rise .35s both}.panelhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.panelhead b{font-size:15px}.hint{font-size:11px;color:var(--muted)}
+#messages{height:270px;overflow:auto;display:flex;flex-direction:column;gap:9px;padding:4px 0 12px}.bubble{max-width:88%;padding:11px 13px;border-radius:16px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.user{align-self:flex-end;background:linear-gradient(135deg,#386cff,#6457e9)}.bot{align-self:flex-start;background:#202d49;border:1px solid #314465}
+.compose{display:flex;gap:8px;align-items:center}.compose input{min-width:0;flex:1;background:#0b1326;border:1px solid #304364;color:white;padding:13px;border-radius:14px;outline:none}.compose input:focus{border-color:var(--cyan)}button{cursor:pointer}.send{width:46px;height:46px;border:0;border-radius:14px;background:linear-gradient(135deg,#4fe0ff,#4d72ff);color:#071329;font-size:20px;font-weight:800}
+.action{width:100%;padding:13px;border:1px solid #3b5d91;border-radius:14px;background:#182747;color:#eaf3ff;font-weight:650;margin-top:9px}.foot{text-align:center;color:#65799e;font-size:11px;margin:16px 0}
+@keyframes float{50%{transform:translateY(-5px)}}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+</style></head>
+<body><main class="app">
+<header class="top"><div class="brand"><div class="logo">✦</div><div><h1>AI Assistant</h1><div class="sub">Твой умный помощник</div></div></div><span class="online">● ONLINE</span></header>
+<section class="hero"><div class="eyebrow">PERSONAL AI SPACE</div><h2>Привет! Чем<br>помочь сегодня?</h2><p>Задавай вопросы, разбирай задания и получай помощь с идеями в одном месте.</p></section>
+<section class="stats"><div class="stat"><small>Модель</small><strong>AI Assistant</strong></div><div class="stat"><small>Остаток лимитов</small><strong id="limitValue">Загрузка…</strong></div></section>
+<nav class="tabs"><button class="tab active" data-tab="chat">💬 Чат</button><button class="tab" data-tab="limits">⚡ Лимиты</button><button class="tab" data-tab="settings">⚙️ Ещё</button></nav>
+<section class="panel" id="chatPanel"><div class="panelhead"><b>Диалог с AI</b><span class="hint">ответы в реальном времени</span></div><div id="messages"><div class="bubble bot">Привет! Напиши сообщение — я помогу 😊</div></div><div class="compose"><input id="message" placeholder="Напиши свой вопрос…" autocomplete="off"><button class="send" id="send">➤</button></div></section>
+<section class="panel" id="limitsPanel" hidden><div class="panelhead"><b>Твои лимиты API</b><span class="hint">последние данные</span></div><div id="limitDetails" class="hint">Отправь запрос в чат, чтобы получить данные о лимитах.</div><button class="action" id="refresh">Обновить данные</button></section>
+<section class="panel" id="settingsPanel" hidden><div class="panelhead"><b>Настройки</b></div><p class="hint">История диалога хранится в текущем сеансе бота.</p><button class="action" id="clear">Очистить историю диалога</button><button class="action" id="close">Закрыть приложение</button></section>
+<div class="foot">Made for Telegram · AI Assistant</div></main>
+<script>
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
+const initData=tg?.initData||"";
+const $=id=>document.getElementById(id);
+const tabs={chat:$("chatPanel"),limits:$("limitsPanel"),settings:$("settingsPanel")};
+document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===b));Object.entries(tabs).forEach(([k,v])=>v.hidden=k!==b.dataset.tab);if(b.dataset.tab==="limits")loadLimits()}));
+function bubble(text,who){const d=document.createElement("div");d.className="bubble "+who;d.textContent=text;$("messages").append(d);$("messages").scrollTop=$("messages").scrollHeight}
+async function api(path,body={}){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Telegram-Init-Data":initData},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw new Error(data.detail||"Ошибка сервера");return data}
+async function send(){const input=$("message"),text=input.value.trim();if(!text)return;input.value="";bubble(text,"user");const btn=$("send");btn.disabled=true;try{const d=await api("/api/miniapp/chat",{text});bubble(d.answer,"bot");if(d.limits){renderLimits(d.limits)}}catch(e){bubble("Не удалось отправить: "+e.message,"bot")}finally{btn.disabled=false}}
+$("send").onclick=send;$("message").addEventListener("keydown",e=>{if(e.key==="Enter")send()});
+function renderLimits(d){const rows=[];if(d["remaining-requests"]!=null)rows.push("Запросов осталось: "+d["remaining-requests"]+" из "+(d["limit-requests"]??"?"));if(d["reset-requests"])rows.push("Сброс: "+d["reset-requests"]);if(d["remaining-tokens"]!=null)rows.push("Токенов осталось: "+d["remaining-tokens"]+" из "+(d["limit-tokens"]??"?"));if(d["reset-tokens"])rows.push("Обновление: "+d["reset-tokens"]);$("limitDetails").textContent=rows.join("\n")||"Лимиты пока не получены. Отправь сообщение в чат.";$("limitValue").textContent=d["remaining-requests"]??"Смотри детали"}
+async function loadLimits(){try{const d=await api("/api/miniapp/limits");renderLimits(d.limits||{})}catch(e){$("limitDetails").textContent=e.message}}
+$("refresh").onclick=loadLimits;$("clear").onclick=async()=>{try{await api("/api/miniapp/clear");$("messages").innerHTML="";bubble("История очищена 🧹","bot")}catch(e){bubble(e.message,"bot")}};$("close").onclick=()=>tg?.close();
+</script></body></html>
