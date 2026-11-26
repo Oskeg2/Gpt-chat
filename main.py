@@ -269,7 +269,7 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
     async def stream_answer():
         history = histories[user_id]
         style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение." if payload.answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов.")
-        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + style_prompt}]
         messages.extend(list(history)[-8:])
         messages.append({"role": "user", "content": text})
         answer_parts = []
@@ -306,7 +306,7 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
                             delta = choices[0].get("delta", {}).get("content")
                             if delta:
                                 answer_parts.append(delta)
-                                yield "data: " + json.dumps({"token": delta}, ensure_ascii=False) + "\\n\\n"
+                                yield "data: " + json.dumps({"token": delta}, ensure_ascii=False) + "\n\n"
             answer = "".join(answer_parts).strip()
             if answer:
                 history.append({"role": "user", "content": text})
@@ -314,10 +314,14 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             if used_tokens:
                 add_daily_tokens(user_id, used_tokens)
             meta = {"done": True, "limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
-            yield "data: " + json.dumps(meta, ensure_ascii=False) + "\\n\\n"
+            yield "data: " + json.dumps(meta, ensure_ascii=False) + "\n\n"
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:1200]
+            log.error("Groq streaming HTTP %s: %s", exc.response.status_code, detail)
+            yield "data: " + json.dumps({"error": f"Groq HTTP {exc.response.status_code}: {detail}"}, ensure_ascii=False) + "\n\n"
         except Exception as exc:
             log.exception("Mini App streaming request failed")
-            yield "data: " + json.dumps({"error": "Не удалось получить ответ. Попробуй ещё раз."}, ensure_ascii=False) + "\\n\\n"
+            yield "data: " + json.dumps({"error": f"Ошибка потока: {type(exc).__name__}: {str(exc)[:500]}"}, ensure_ascii=False) + "\n\n"
 
     return StreamingResponse(stream_answer(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
