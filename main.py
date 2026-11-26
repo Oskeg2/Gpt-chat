@@ -390,10 +390,6 @@ def format_rate_limits(model: str) -> str:
     if not stats:
         return f"Пока нет данных по модели {model}. Отправь любой запрос, а затем снова спроси про лимит."
     lines = [f"📊 Лимиты модели {model} (по последнему ответу API):"]
-    if stats.get("remaining-requests") is not None:
-        lines.append(f"• Запросов на день: {stats['remaining-requests']} из {stats.get('limit-requests', '?')} осталось")
-    if stats.get("reset-requests"):
-        lines.append(f"• Сброс дневного лимита: через {stats['reset-requests']}")
     if stats.get("remaining-tokens") is not None:
         lines.append(f"• Токенов на минуту: {stats['remaining-tokens']} из {stats.get('limit-tokens', '?')} осталось")
     if stats.get("reset-tokens"):
