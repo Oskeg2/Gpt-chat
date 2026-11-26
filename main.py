@@ -240,7 +240,8 @@ async def admin_api_action(payload: AdminActionRequest, user_id: int = Depends(m
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok":True,"account":account_info(payload.user_id)}
-\n@app.get("/app")
+
+@app.get("/app")
 async def miniapp():
     return FileResponse("static/index.html")
 
