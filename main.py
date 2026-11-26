@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import time
+import sqlite3
+from datetime import datetime, timezone
 from urllib.parse import parse_qsl
 from collections import defaultdict, deque
 
@@ -29,11 +31,62 @@ SYSTEM_PROMPT = os.getenv(
     "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
 )
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
+DAILY_USER_LIMIT = int(os.getenv("DAILY_USER_LIMIT", "1000"))
+USAGE_DB_PATH = os.getenv("USAGE_DB_PATH", "usage.db")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 
 app = FastAPI(title="Telegram Groq AI Bot")
+
+
+def init_usage_db():
+    with sqlite3.connect(USAGE_DB_PATH) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS daily_usage (
+            user_id INTEGER NOT NULL, usage_date TEXT NOT NULL, request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, usage_date)
+        )""")
+
+
+def get_daily_usage(user_id: int) -> int:
+    today = datetime.now(timezone.utc).date().isoformat()
+    with sqlite3.connect(USAGE_DB_PATH) as db:
+        row = db.execute(
+            "SELECT request_count FROM daily_usage WHERE user_id = ? AND usage_date = ?",
+            (user_id, today),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def consume_daily_request(user_id: int) -> tuple[bool, int]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    with sqlite3.connect(USAGE_DB_PATH, timeout=10) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT request_count FROM daily_usage WHERE user_id = ? AND usage_date = ?",
+            (user_id, today),
+        ).fetchone()
+        used = int(row[0]) if row else 0
+        if used >= DAILY_USER_LIMIT:
+            db.commit()
+            return False, 0
+        used += 1
+        db.execute(
+            "INSERT INTO daily_usage (user_id, usage_date, request_count) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, usage_date) DO UPDATE SET request_count = excluded.request_count",
+            (user_id, today, used),
+        )
+        db.commit()
+    return True, DAILY_USER_LIMIT - used
+
+
+def daily_usage_payload(user_id: int) -> dict:
+    used = get_daily_usage(user_id)
+    return {"limit": DAILY_USER_LIMIT, "used": used, "remaining": max(0, DAILY_USER_LIMIT - used),
+            "resets_at": "00:00 UTC"}
+
+
+init_usage_db()
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -88,19 +141,25 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
+        allowed, remaining = consume_daily_request(user_id)
+        if not allowed:
+            raise HTTPException(status_code=429, detail=f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC.")
         answer = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
         model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
     else:
         if not text:
             raise HTTPException(status_code=400, detail="Напиши сообщение.")
+        allowed, remaining = consume_daily_request(user_id)
+        if not allowed:
+            raise HTTPException(status_code=429, detail=f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC.")
         answer = await ask_groq(user_id, text, payload.answer_mode)
         model = GROQ_MODEL
-    return {"answer": answer, "limits": rate_limits.get(model, {})}
+    return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id)}
 
 
 @app.post("/api/miniapp/limits")
 async def miniapp_limits(user_id: int = Depends(miniapp_user)):
-    return {"limits": rate_limits.get(GROQ_MODEL, {})}
+    return {"limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id)}
 
 
 @app.post("/api/miniapp/clear")
@@ -324,6 +383,11 @@ async def handle_update(update: dict):
 
     if text.startswith("/") and not photos and not document_is_image:
         await send_message(chat_id, "Неизвестная команда. Напиши /help.")
+        return
+
+    allowed, remaining = consume_daily_request(user_id)
+    if not allowed:
+        await send_message(chat_id, f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC. 🌙")
         return
 
     await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
