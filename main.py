@@ -26,8 +26,8 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 RENDER_EXTERNAL_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-MODEL_OPTIONS = {"openai/gpt-oss-20b": "GPT-OSS 20B", "openai/gpt-oss-120b": "GPT-OSS 120B", "llama-3.3-70b-versatile": "Llama 3.3 70B", "llama-3.1-8b-instant": "Llama 3.1 8B", "qwen/qwen3.8-27b": "Qwen 3.8 27B"}
-FALLBACK_MODELS = [x.strip() for x in os.getenv("GROQ_FALLBACK_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile,llama-3.1-8b-instant,openai/gpt-oss-20b").split(",") if x.strip() in MODEL_OPTIONS]
+MODEL_OPTIONS = {"openai/gpt-oss-20b": "GPT-OSS 20B · быстрый", "openai/gpt-oss-120b": "GPT-OSS 120B · мощный", "qwen/qwen3.8-27b": "Qwen 3.8 27B · экспериментальная"}
+FALLBACK_MODELS = [x.strip() for x in os.getenv("GROQ_FALLBACK_MODELS", "openai/gpt-oss-120b,openai/gpt-oss-20b").split(",") if x.strip() in MODEL_OPTIONS]
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
@@ -495,22 +495,34 @@ async def ask_groq(user_id: int, user_text: str, answer_mode: str = "short") -> 
     messages.extend(list(history))
     messages.append({"role": "user", "content": user_text})
 
+    candidates = [GROQ_MODEL] + [x for x in FALLBACK_MODELS if x != GROQ_MODEL]
+    last_error = None
+    data = None
     async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            GROQ_API,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": messages,
-                "stream": False,
-            },
-        )
-        response.raise_for_status()
-        save_rate_limits(response, GROQ_MODEL)
-        data = response.json()
+        for candidate in candidates:
+            response = await client.post(
+                GROQ_API,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": candidate,
+                    "messages": messages,
+                    "stream": False,
+                },
+            )
+            if response.status_code in (429, 500, 502, 503, 504):
+                last_error = httpx.HTTPStatusError("Модель временно недоступна", request=response.request, response=response)
+                continue
+            response.raise_for_status()
+            save_rate_limits(response, candidate)
+            data = response.json()
+            break
+    if data is None:
+        if last_error:
+            raise last_error
+        raise RuntimeError("Нет доступных моделей Groq.")
 
     answer = data["choices"][0]["message"]["content"].strip()
     used_tokens = int((data.get("usage") or {}).get("total_tokens", 0))
