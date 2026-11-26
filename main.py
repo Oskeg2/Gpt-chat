@@ -441,7 +441,6 @@ async def handle_update(update: dict):
 
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
-    remember_user(user_id, message)
     text = (message.get("text") or message.get("caption") or "").strip()
     photos = message.get("photo") or []
     document = message.get("document") or {}
@@ -449,6 +448,15 @@ async def handle_update(update: dict):
 
     if not text and not photos and not document_is_image:
         return
+
+    # Показываем «печатает» до любых синхронных запросов к PostgreSQL.
+    if not text.startswith("/"):
+        try:
+            await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        except Exception:
+            log.exception("Could not send initial typing status")
+
+    remember_user(user_id, message)
 
     if text.startswith("/") and user_id in ADMIN_IDS:
         parts = text.split()
@@ -551,7 +559,6 @@ async def handle_update(update: dict):
         await send_message(chat_id, f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC. 🌙")
         return
 
-    await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
     try:
         if photos or document_is_image:
             file_id = photos[-1]["file_id"] if photos else document["file_id"]
