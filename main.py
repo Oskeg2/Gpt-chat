@@ -6,8 +6,8 @@ import hashlib
 import hmac
 import json
 import time
-import sqlite3
-from datetime import datetime, timezone
+
+import psycopg2
 from urllib.parse import parse_qsl
 from collections import defaultdict, deque
 
@@ -32,7 +32,7 @@ SYSTEM_PROMPT = os.getenv(
 )
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 DAILY_USER_LIMIT = int(os.getenv("DAILY_USER_LIMIT", "1000"))
-USAGE_DB_PATH = os.getenv("USAGE_DB_PATH", "usage.db")
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
@@ -41,43 +41,47 @@ app = FastAPI(title="Telegram Groq AI Bot")
 
 
 def init_usage_db():
-    with sqlite3.connect(USAGE_DB_PATH) as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS daily_usage (
-            user_id INTEGER NOT NULL, usage_date TEXT NOT NULL, request_count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (user_id, usage_date)
-        )""")
+    with psycopg2.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC'")
+            cur.execute("""CREATE TABLE IF NOT EXISTS daily_usage (
+                user_id BIGINT NOT NULL,
+                usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, usage_date)
+            )""")
 
 
 def get_daily_usage(user_id: int) -> int:
-    today = datetime.now(timezone.utc).date().isoformat()
-    with sqlite3.connect(USAGE_DB_PATH) as db:
-        row = db.execute(
-            "SELECT request_count FROM daily_usage WHERE user_id = ? AND usage_date = ?",
-            (user_id, today),
-        ).fetchone()
+    with psycopg2.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC'")
+            cur.execute(
+                "SELECT request_count FROM daily_usage WHERE user_id = %s AND usage_date = CURRENT_DATE",
+                (user_id,),
+            )
+            row = cur.fetchone()
     return int(row[0]) if row else 0
 
 
 def consume_daily_request(user_id: int) -> tuple[bool, int]:
-    today = datetime.now(timezone.utc).date().isoformat()
-    with sqlite3.connect(USAGE_DB_PATH, timeout=10) as db:
-        db.execute("BEGIN IMMEDIATE")
-        row = db.execute(
-            "SELECT request_count FROM daily_usage WHERE user_id = ? AND usage_date = ?",
-            (user_id, today),
-        ).fetchone()
-        used = int(row[0]) if row else 0
-        if used >= DAILY_USER_LIMIT:
-            db.commit()
-            return False, 0
-        used += 1
-        db.execute(
-            "INSERT INTO daily_usage (user_id, usage_date, request_count) VALUES (?, ?, ?) "
-            "ON CONFLICT(user_id, usage_date) DO UPDATE SET request_count = excluded.request_count",
-            (user_id, today, used),
-        )
-        db.commit()
-    return True, DAILY_USER_LIMIT - used
+    with psycopg2.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC'")
+            cur.execute(
+                """INSERT INTO daily_usage (user_id, usage_date, request_count)
+                   VALUES (%s, CURRENT_DATE, 1)
+                   ON CONFLICT (user_id, usage_date)
+                   DO UPDATE SET request_count = daily_usage.request_count + 1
+                   WHERE daily_usage.request_count < %s
+                   RETURNING request_count""",
+                (user_id, DAILY_USER_LIMIT),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return False, 0
+    used = int(row[0])
+    return True, max(0, DAILY_USER_LIMIT - used)
 
 
 def daily_usage_payload(user_id: int) -> dict:
