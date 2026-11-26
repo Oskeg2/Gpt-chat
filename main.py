@@ -27,6 +27,34 @@ app = FastAPI(title="Telegram Groq AI Bot")
 
 # История хранится в памяти процесса и очищается при перезапуске Render.
 histories = defaultdict(lambda: deque(maxlen=MAX_HISTORY_MESSAGES))
+# Последние лимиты из HTTP-заголовков Groq, отдельно для каждой модели.
+rate_limits = {}
+
+
+def save_rate_limits(response: httpx.Response, model: str):
+    names = ("limit-requests", "remaining-requests", "reset-requests",
+             "limit-tokens", "remaining-tokens", "reset-tokens")
+    values = {name: response.headers.get("x-ratelimit-" + name) for name in names}
+    if any(value is not None for value in values.values()):
+        rate_limits[model] = values
+
+
+def format_rate_limits(model: str) -> str:
+    stats = rate_limits.get(model)
+    if not stats:
+        return f"Пока нет данных по модели {model}. Отправь любой запрос, а затем снова спроси про лимит."
+    lines = [f"📊 Лимиты модели {model} (по последнему ответу API):"]
+    if stats.get("remaining-requests") is not None:
+        lines.append(f"• Запросов на день: {stats['remaining-requests']} из {stats.get('limit-requests', '?')} осталось")
+    if stats.get("reset-requests"):
+        lines.append(f"• Сброс дневного лимита: через {stats['reset-requests']}")
+    if stats.get("remaining-tokens") is not None:
+        lines.append(f"• Токенов на минуту: {stats['remaining-tokens']} из {stats.get('limit-tokens', '?')} осталось")
+    if stats.get("reset-tokens"):
+        lines.append(f"• Обновление минутного лимита: через {stats['reset-tokens']}")
+    lines.append("Это лимиты API для этой модели, а не денежный баланс. Данные обновляются после запросов.")
+    return "\n".join(lines)
+
 
 
 async def telegram_call(method: str, payload: dict, timeout: float = 30):
@@ -100,6 +128,7 @@ async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes,
             },
         )
         response.raise_for_status()
+        save_rate_limits(response, vision_model)
         data = response.json()
 
     answer = data["choices"][0]["message"]["content"].strip()
@@ -131,6 +160,7 @@ async def ask_groq(user_id: int, user_text: str) -> str:
             },
         )
         response.raise_for_status()
+        save_rate_limits(response, GROQ_MODEL)
         data = response.json()
 
     answer = data["choices"][0]["message"]["content"].strip()
@@ -160,6 +190,7 @@ async def handle_update(update: dict):
                 {"command": "start", "description": "Запустить бота"},
                 {"command": "help", "description": "Что умеет бот"},
                 {"command": "clear", "description": "Очистить историю диалога"},
+                {"command": "limit", "description": "Показать остаток лимитов API"},
             ]
         })
         await send_message(
@@ -170,7 +201,8 @@ async def handle_update(update: dict):
             "Доступные команды:\\n"
             "/start — запустить бота\\n"
             "/help — помощь и возможности\\n"
-            "/clear — очистить историю диалога\\n\\n"
+            "/clear — очистить историю диалога\\n"
+            "/limit — показать остаток лимитов\\n\\n"
             "Просто напиши, чем помочь! 😊"
         )
         return
@@ -187,6 +219,13 @@ async def handle_update(update: dict):
     if text.startswith("/clear"):
         histories.pop(user_id, None)
         await send_message(chat_id, "История диалога очищена 🧹")
+        return
+
+    if text.startswith("/limit") or any(
+        phrase in text.lower()
+        for phrase in ("сколько осталось лимита", "сколько лимита осталось", "остаток лимита", "сколько осталось запросов")
+    ):
+        await send_message(chat_id, format_rate_limits(GROQ_MODEL))
         return
 
     if text.startswith("/") and not photos and not document_is_image:
