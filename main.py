@@ -31,7 +31,7 @@ SYSTEM_PROMPT = os.getenv(
     "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
 )
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
-DAILY_USER_LIMIT = int(os.getenv("DAILY_USER_LIMIT", "1000"))
+DAILY_TOKEN_LIMIT = int(os.getenv("DAILY_TOKEN_LIMIT", "8000"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -48,8 +48,10 @@ def init_usage_db():
                 user_id BIGINT NOT NULL,
                 usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
                 request_count INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, usage_date)
             )""")
+            cur.execute("ALTER TABLE daily_usage ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0")
 
 
 def get_daily_usage(user_id: int) -> int:
@@ -57,37 +59,39 @@ def get_daily_usage(user_id: int) -> int:
         with db.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(
-                "SELECT request_count FROM daily_usage WHERE user_id = %s AND usage_date = CURRENT_DATE",
+                "SELECT total_tokens FROM daily_usage WHERE user_id = %s AND usage_date = CURRENT_DATE",
                 (user_id,),
             )
             row = cur.fetchone()
     return int(row[0]) if row else 0
 
 
-def consume_daily_request(user_id: int) -> tuple[bool, int]:
+def can_make_request(user_id: int) -> bool:
+    return get_daily_usage(user_id) < DAILY_TOKEN_LIMIT
+
+
+def add_daily_tokens(user_id: int, tokens: int) -> int:
+    tokens = max(0, int(tokens or 0))
     with psycopg2.connect(DATABASE_URL) as db:
         with db.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
             cur.execute(
-                """INSERT INTO daily_usage (user_id, usage_date, request_count)
-                   VALUES (%s, CURRENT_DATE, 1)
+                """INSERT INTO daily_usage (user_id, usage_date, request_count, total_tokens)
+                   VALUES (%s, CURRENT_DATE, 1, %s)
                    ON CONFLICT (user_id, usage_date)
-                   DO UPDATE SET request_count = daily_usage.request_count + 1
-                   WHERE daily_usage.request_count < %s
-                   RETURNING request_count""",
-                (user_id, DAILY_USER_LIMIT),
+                   DO UPDATE SET request_count = daily_usage.request_count + 1,
+                                 total_tokens = daily_usage.total_tokens + EXCLUDED.total_tokens
+                   RETURNING total_tokens""",
+                (user_id, tokens),
             )
             row = cur.fetchone()
-    if row is None:
-        return False, 0
-    used = int(row[0])
-    return True, max(0, DAILY_USER_LIMIT - used)
+    return int(row[0])
 
 
 def daily_usage_payload(user_id: int) -> dict:
     used = get_daily_usage(user_id)
-    return {"limit": DAILY_USER_LIMIT, "used": used, "remaining": max(0, DAILY_USER_LIMIT - used),
-            "resets_at": "00:00 UTC"}
+    return {"limit": DAILY_TOKEN_LIMIT, "used": used, "remaining": max(0, DAILY_TOKEN_LIMIT - used),
+            "unit": "tokens", "resets_at": "00:00 UTC"}
 
 
 init_usage_db()
@@ -145,18 +149,18 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
-        allowed, remaining = consume_daily_request(user_id)
-        if not allowed:
-            raise HTTPException(status_code=429, detail=f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC.")
-        answer = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
+        if not can_make_request(user_id):
+            raise HTTPException(status_code=429, detail=f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC.")
+        answer, used_tokens = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
+        add_daily_tokens(user_id, used_tokens)
         model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
     else:
         if not text:
             raise HTTPException(status_code=400, detail="Напиши сообщение.")
-        allowed, remaining = consume_daily_request(user_id)
-        if not allowed:
-            raise HTTPException(status_code=429, detail=f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC.")
-        answer = await ask_groq(user_id, text, payload.answer_mode)
+        if not can_make_request(user_id):
+            raise HTTPException(status_code=429, detail=f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC.")
+        answer, used_tokens = await ask_groq(user_id, text, payload.answer_mode)
+        add_daily_tokens(user_id, used_tokens)
         model = GROQ_MODEL
     return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id)}
 
@@ -236,7 +240,7 @@ async def download_telegram_file(file_id: str) -> tuple[bytes, str]:
         return response.content, content_type
 
 
-async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str, answer_mode: str = "short") -> str:
+async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str, answer_mode: str = "short") -> tuple[str, int]:
     """Отправляет фотографию и вопрос vision-модели Groq."""
     import base64
 
@@ -281,15 +285,16 @@ async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes,
         data = response.json()
 
     answer = data["choices"][0]["message"]["content"].strip()
+    used_tokens = int((data.get("usage") or {}).get("total_tokens", 0))
     history.append({
         "role": "user",
         "content": f"[Пользователь отправил изображение] {prompt}",
     })
     history.append({"role": "assistant", "content": answer})
-    return answer
+    return answer, used_tokens
 
 
-async def ask_groq(user_id: int, user_text: str, answer_mode: str = "short") -> str:
+async def ask_groq(user_id: int, user_text: str, answer_mode: str = "short") -> tuple[str, int]:
     history = histories[user_id]
     style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение. Не теряй важные условия и точность." if answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов, примерами при необходимости и важными оговорками.")
     messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
@@ -314,9 +319,10 @@ async def ask_groq(user_id: int, user_text: str, answer_mode: str = "short") -> 
         data = response.json()
 
     answer = data["choices"][0]["message"]["content"].strip()
+    used_tokens = int((data.get("usage") or {}).get("total_tokens", 0))
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
-    return answer
+    return answer, used_tokens
 
 
 async def handle_update(update: dict):
@@ -389,9 +395,8 @@ async def handle_update(update: dict):
         await send_message(chat_id, "Неизвестная команда. Напиши /help.")
         return
 
-    allowed, remaining = consume_daily_request(user_id)
-    if not allowed:
-        await send_message(chat_id, f"Дневной лимит исчерпан: {DAILY_USER_LIMIT} запросов. Он обновится в 00:00 UTC. 🌙")
+    if not can_make_request(user_id):
+        await send_message(chat_id, f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC. 🌙")
         return
 
     await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
@@ -402,9 +407,10 @@ async def handle_update(update: dict):
             if len(image_bytes) > 20 * 1024 * 1024:
                 await send_message(chat_id, "Фото слишком большое. Отправь изображение размером до 20 МБ.")
                 return
-            answer = await ask_groq_about_image(user_id, text, image_bytes, mime_type)
+            answer, used_tokens = await ask_groq_about_image(user_id, text, image_bytes, mime_type)
         else:
-            answer = await ask_groq(user_id, text)
+            answer, used_tokens = await ask_groq(user_id, text)
+        add_daily_tokens(user_id, used_tokens)
         await send_message(chat_id, answer)
     except httpx.HTTPStatusError as exc:
         log.exception("AI API returned an error: %s", exc.response.text[:1500])
