@@ -92,7 +92,7 @@ def account_info(user_id: int) -> dict:
             cur.execute("INSERT INTO user_accounts (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
             cur.execute("SELECT bonus_tokens, daily_limit, is_blocked, is_unlimited, selected_model FROM user_accounts WHERE user_id=%s", (user_id,))
             row = cur.fetchone()
-    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3]), "selected_model": row[4] if row[4] in MODEL_OPTIONS else GROQ_MODEL}
+    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3]), "selected_model": row[4] if row[4] in MODEL_OPTIONS else (GROQ_MODEL if GROQ_MODEL in MODEL_OPTIONS else "openai/gpt-oss-20b")}
 
 def can_make_request(user_id: int) -> bool:
     a = account_info(user_id)
