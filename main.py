@@ -287,45 +287,63 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
         answer_parts = []
         used_tokens = 0
         try:
+            candidates = [selected_model] + [x for x in FALLBACK_MODELS if x != selected_model]
+            active_model = None
+            last_error = None
             async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
-                async with client.stream("POST", GROQ_API, headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                }, json={
-                    "model": GROQ_MODEL,
-                    "messages": messages,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                    "max_completion_tokens": 1024,
-                }) as response:
-                    response.raise_for_status()
-                    save_rate_limits(response, GROQ_MODEL)
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[6:]
-                        if raw == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        usage = chunk.get("usage")
-                        if usage:
-                            used_tokens = int(usage.get("total_tokens", 0))
-                        choices = chunk.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta", {}).get("content")
-                            if delta:
-                                answer_parts.append(delta)
-                                yield "data: " + json.dumps({"token": delta}, ensure_ascii=False) + "\n\n"
+                for candidate in candidates:
+                    try:
+                        async with client.stream("POST", GROQ_API, headers={
+                            "Authorization": f"Bearer {GROQ_API_KEY}",
+                            "Content-Type": "application/json",
+                        }, json={
+                            "model": candidate,
+                            "messages": messages,
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                            "max_completion_tokens": 1024,
+                        }) as response:
+                            if response.status_code in (429, 500, 502, 503, 504):
+                                last_error = httpx.HTTPStatusError("Модель временно недоступна", request=response.request, response=response)
+                                continue
+                            response.raise_for_status()
+                            active_model = candidate
+                            save_rate_limits(response, candidate)
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data: "):
+                                    continue
+                                raw = line[6:]
+                                if raw == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(raw)
+                                except json.JSONDecodeError:
+                                    continue
+                                usage = chunk.get("usage")
+                                if usage:
+                                    used_tokens = int(usage.get("total_tokens", 0))
+                                choices = chunk.get("choices") or []
+                                if choices:
+                                    delta = choices[0].get("delta", {}).get("content")
+                                    if delta:
+                                        answer_parts.append(delta)
+                                        yield "data: " + json.dumps({"token": delta}, ensure_ascii=False) + "\n\n"
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        last_error = exc
+                        if exc.response.status_code not in (429, 500, 502, 503, 504) or answer_parts:
+                            raise
+                if active_model is None:
+                    if last_error:
+                        raise last_error
+                    raise RuntimeError("Нет доступных моделей Groq.")
             answer = "".join(answer_parts).strip()
             if answer:
                 history.append({"role": "user", "content": text})
                 history.append({"role": "assistant", "content": answer})
             if used_tokens:
                 add_daily_tokens(user_id, used_tokens)
-            meta = {"done": True, "limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
+            meta = {"done": True, "model": active_model, "limits": rate_limits.get(active_model, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
             yield "data: " + json.dumps(meta, ensure_ascii=False) + "\n\n"
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:1200]
