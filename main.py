@@ -170,12 +170,6 @@ def add_daily_tokens(user_id: int, tokens: int) -> int:
     return total
 
 
-def daily_usage_payload(user_id: int) -> dict:
-    used = get_daily_usage(user_id)
-    return {"limit": DAILY_TOKEN_LIMIT, "used": used, "remaining": max(0, DAILY_TOKEN_LIMIT - used),
-            "unit": "tokens", "resets_at": "00:00 UTC"}
-
-
 init_usage_db()
 
 
@@ -276,12 +270,12 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
         answer, used_tokens = await ask_groq(user_id, text, payload.answer_mode)
         add_daily_tokens(user_id, used_tokens)
         model = GROQ_MODEL
-    return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id)}
+    return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
 
 
 @app.post("/api/miniapp/limits")
 async def miniapp_limits(user_id: int = Depends(miniapp_user)):
-    return {"limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id)}
+    return {"limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
 
 
 @app.post("/api/miniapp/clear")
