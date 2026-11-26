@@ -70,6 +70,7 @@ class MiniChatRequest(BaseModel):
     text: str = ""
     image_base64: str | None = None
     mime_type: str = "image/jpeg"
+    answer_mode: str = "short"
 
 
 @app.get("/app")
@@ -87,12 +88,12 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
-        answer = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type)
+        answer = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
         model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
     else:
         if not text:
             raise HTTPException(status_code=400, detail="Напиши сообщение.")
-        answer = await ask_groq(user_id, text)
+        answer = await ask_groq(user_id, text, payload.answer_mode)
         model = GROQ_MODEL
     return {"answer": answer, "limits": rate_limits.get(model, {})}
 
@@ -172,7 +173,7 @@ async def download_telegram_file(file_id: str) -> tuple[bytes, str]:
         return response.content, content_type
 
 
-async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str) -> str:
+async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str, answer_mode: str = "short") -> str:
     """Отправляет фотографию и вопрос vision-модели Groq."""
     import base64
 
@@ -184,7 +185,8 @@ async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes,
     )
 
     history = histories[user_id]
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение. Не теряй важные условия и точность." if answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов, примерами при необходимости и важными оговорками.")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
     messages.extend(list(history))
     messages.append({
         "role": "user",
@@ -224,9 +226,10 @@ async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes,
     return answer
 
 
-async def ask_groq(user_id: int, user_text: str) -> str:
+async def ask_groq(user_id: int, user_text: str, answer_mode: str = "short") -> str:
     history = histories[user_id]
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение. Не теряй важные условия и точность." if answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов, примерами при необходимости и важными оговорками.")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
     messages.extend(list(history))
     messages.append({"role": "user", "content": user_text})
 
