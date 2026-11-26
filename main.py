@@ -55,7 +55,6 @@ def init_usage_db():
                 PRIMARY KEY (user_id, usage_date)
             )""")
             cur.execute("ALTER TABLE daily_usage ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0")
-            cur.execute("ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT 'openai/gpt-oss-20b'")
             cur.execute("""CREATE TABLE IF NOT EXISTS user_accounts (
                 user_id BIGINT PRIMARY KEY,
                 bonus_tokens BIGINT NOT NULL DEFAULT 0,
@@ -64,6 +63,7 @@ def init_usage_db():
                 is_unlimited BOOLEAN NOT NULL DEFAULT FALSE,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
+            cur.execute("ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT 'openai/gpt-oss-20b'")
             cur.execute("""CREATE TABLE IF NOT EXISTS bot_users (
                 user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT,
                 last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
