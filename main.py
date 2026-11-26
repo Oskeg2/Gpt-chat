@@ -566,8 +566,6 @@ async def handle_update(update: dict):
         except Exception:
             log.exception("Could not send initial typing status")
 
-    remember_user(user_id, message)
-
     if text.startswith("/") and user_id in ADMIN_IDS:
         parts = text.split()
         cmd = parts[0].split("@")[0].lower()
@@ -604,21 +602,29 @@ async def handle_update(update: dict):
             return
 
     if text.startswith("/start"):
-        await telegram_call("setMyCommands", {
-            "commands": [
-                {"command": "start", "description": "Запустить бота"},
-                {"command": "help", "description": "Что умеет бот"},
-                {"command": "clear", "description": "Очистить историю диалога"},
-                {"command": "limit", "description": "Показать остаток лимитов API"},
-            ]
-        })
-        await telegram_call("setChatMenuButton", {
-            "menu_button": {
-                "type": "web_app",
-                "text": "Открыть AI",
-                "web_app": {"url": "https://telegram-groq-ai-bot.onrender.com/app"},
-            }
-        })
+        # Не ждём PostgreSQL и настройки меню перед приветствием.
+        async def configure_start_menu():
+            try:
+                await telegram_call("setMyCommands", {
+                    "commands": [
+                        {"command": "start", "description": "Запустить бота"},
+                        {"command": "help", "description": "Что умеет бот"},
+                        {"command": "clear", "description": "Очистить историю диалога"},
+                        {"command": "limit", "description": "Показать остаток лимитов"},
+                    ]
+                })
+                await telegram_call("setChatMenuButton", {
+                    "menu_button": {
+                        "type": "web_app",
+                        "text": "Открыть AI",
+                        "web_app": {"url": "https://telegram-groq-ai-bot.onrender.com/app"},
+                    }
+                })
+            except Exception:
+                log.exception("Could not configure Telegram start menu")
+
+        asyncio.create_task(configure_start_menu())
+        asyncio.create_task(asyncio.to_thread(remember_user, user_id, message))
         await send_message(
             chat_id,
             "Привет! 👋 Я твой AI-помощник.\n\n"
