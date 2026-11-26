@@ -64,6 +64,7 @@ def init_usage_db():
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
             cur.execute("ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT 'openai/gpt-oss-20b'")
+            cur.execute("ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS chat_style TEXT NOT NULL DEFAULT 'normal'")
             cur.execute("""CREATE TABLE IF NOT EXISTS bot_users (
                 user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT,
                 last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -90,9 +91,9 @@ def account_info(user_id: int) -> dict:
     with psycopg2.connect(DATABASE_URL) as db:
         with db.cursor() as cur:
             cur.execute("INSERT INTO user_accounts (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
-            cur.execute("SELECT bonus_tokens, daily_limit, is_blocked, is_unlimited, selected_model FROM user_accounts WHERE user_id=%s", (user_id,))
+            cur.execute("SELECT bonus_tokens, daily_limit, is_blocked, is_unlimited, selected_model, chat_style FROM user_accounts WHERE user_id=%s", (user_id,))
             row = cur.fetchone()
-    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3]), "selected_model": row[4] if row[4] in MODEL_OPTIONS else (GROQ_MODEL if GROQ_MODEL in MODEL_OPTIONS else "openai/gpt-oss-20b")}
+    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3]), "selected_model": row[4] if row[4] in MODEL_OPTIONS else (GROQ_MODEL if GROQ_MODEL in MODEL_OPTIONS else "openai/gpt-oss-20b"), "chat_style": row[5] if row[5] in ("normal", "profanity", "roast") else "normal"}
 
 def can_make_request(user_id: int) -> bool:
     a = account_info(user_id)
@@ -212,6 +213,7 @@ class MiniChatRequest(BaseModel):
     mime_type: str = "image/jpeg"
     answer_mode: str = "short"
     model: str | None = None
+    chat_style: str = "normal"
 
 
 class AdminActionRequest(BaseModel):
@@ -251,7 +253,8 @@ async def miniapp():
 
 @app.post("/api/miniapp/models")
 async def miniapp_models(user_id: int = Depends(miniapp_user)):
-    return {"models": [{"id": k, "name": v} for k, v in MODEL_OPTIONS.items()], "selected": account_info(user_id)["selected_model"]}
+    info = account_info(user_id)
+    return {"models": [{"id": k, "name": v} for k, v in MODEL_OPTIONS.items()], "selected": info["selected_model"], "chat_style": info["chat_style"]}
 
 
 @app.post("/api/miniapp/chat")
@@ -263,6 +266,10 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
     with psycopg2.connect(DATABASE_URL) as db:
         with db.cursor() as cur:
             cur.execute("UPDATE user_accounts SET selected_model=%s,updated_at=NOW() WHERE user_id=%s", (selected_model, user_id))
+    chat_style = payload.chat_style if payload.chat_style in ("normal", "profanity", "roast") else account_info(user_id)["chat_style"]
+    with psycopg2.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute("UPDATE user_accounts SET chat_style=%s,updated_at=NOW() WHERE user_id=%s", (chat_style, user_id))
     text = payload.text.strip()
     if payload.image_base64:
         try:
@@ -271,7 +278,7 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
-        answer, used_tokens = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
+        answer, used_tokens = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode, chat_style)
         add_daily_tokens(user_id, used_tokens)
         model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
         return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
@@ -281,6 +288,7 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
     async def stream_answer():
         history = histories[user_id]
         style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение." if payload.answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов.")
+        style_prompt += chat_style_instruction(chat_style)
         messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + style_prompt}]
         messages.extend(list(history)[-8:])
         messages.append({"role": "user", "content": text})
@@ -430,7 +438,15 @@ async def download_telegram_file(file_id: str) -> tuple[bytes, str]:
         return response.content, content_type
 
 
-async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str, answer_mode: str = "short") -> tuple[str, int]:
+def chat_style_instruction(style: str) -> str:
+    if style == "profanity":
+        return "\\n\\nПользователь явно разрешил мат: можешь естественно использовать ненаправленную грубую лексику и крепкие выражения, если это уместно. Не превращай каждый ответ в ругань; сохраняй полезность и точность."
+    if style == "roast":
+        return "\\n\\nПользователь явно включил дружескую прожарку: можешь шутливо подкалывать и слегка обзывать самого пользователя в добродушном, игровом стиле. Не используй угрозы, травлю, унижение по защищённым признакам, сексуальные оскорбления или пожелания вреда. Если тема серьёзная, опасная или пользователь расстроен, отвечай бережно и без прожарки."
+    return "\\n\\nОбщайся вежливо, без мата и оскорблений."
+
+
+async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str, answer_mode: str = "short", chat_style: str = "normal") -> tuple[str, int]:
     """Отправляет фотографию и вопрос vision-модели Groq."""
     import base64
 
@@ -443,6 +459,7 @@ async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes,
 
     history = histories[user_id]
     style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение. Не теряй важные условия и точность." if answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов, примерами при необходимости и важными оговорками.")
+    style_prompt += chat_style_instruction(chat_style)
     messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
     messages.extend(list(history))
     messages.append({
