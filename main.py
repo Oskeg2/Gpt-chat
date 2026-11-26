@@ -49,6 +49,68 @@ async def send_message(chat_id: int, text: str):
         })
 
 
+async def download_telegram_file(file_id: str) -> tuple[bytes, str]:
+    """Скачивает фото из Telegram и возвращает байты и MIME-тип."""
+    file_info = await telegram_call("getFile", {"file_id": file_id})
+    file_path = file_info["file_path"]
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
+        return response.content, content_type
+
+
+async def ask_groq_about_image(user_id: int, user_text: str, image_bytes: bytes, mime_type: str) -> str:
+    """Отправляет фотографию и вопрос vision-модели Groq."""
+    import base64
+
+    vision_model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    prompt = user_text or (
+        "Подробно рассмотри изображение. Если на нём задание, реши его "
+        "пошагово и объясни ответ на русском языке."
+    )
+
+    history = histories[user_id]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(list(history))
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+            },
+        ],
+    })
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(
+            GROQ_API,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": vision_model,
+                "messages": messages,
+                "stream": False,
+                "max_completion_tokens": 2048,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    answer = data["choices"][0]["message"]["content"].strip()
+    history.append({
+        "role": "user",
+        "content": f"[Пользователь отправил изображение] {prompt}",
+    })
+    history.append({"role": "assistant", "content": answer})
+    return answer
+
+
 async def ask_groq(user_id: int, user_text: str) -> str:
     history = histories[user_id]
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -79,18 +141,25 @@ async def ask_groq(user_id: int, user_text: str) -> str:
 
 async def handle_update(update: dict):
     message = update.get("message") or update.get("edited_message")
-    if not message or not message.get("text"):
+    if not message:
         return
 
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
-    text = message["text"].strip()
+    text = (message.get("text") or message.get("caption") or "").strip()
+    photos = message.get("photo") or []
+    document = message.get("document") or {}
+    document_is_image = (document.get("mime_type") or "").startswith("image/")
+
+    if not text and not photos and not document_is_image:
+        return
 
     if text.startswith("/start"):
         await send_message(
             chat_id,
-            "Привет! 👋 Я бесплатный AI-бот на базе модели GPT-OSS через Groq.\n\n"
-            "Напиши вопрос — и я отвечу.\n"
+            "Привет! 👋 Я AI-ассистент на Groq.\n\n"
+            "Можешь писать вопросы и отправлять фотографии с заданиями — "
+            "я прочитаю их и постараюсь решить пошагово.\n\n"
             "/clear — очистить историю диалога\n"
             "/help — помощь"
         )
@@ -99,7 +168,8 @@ async def handle_update(update: dict):
     if text.startswith("/help"):
         await send_message(
             chat_id,
-            "Я отвечаю на вопросы и учитываю контекст переписки.\n"
+            "Я отвечаю на вопросы и умею анализировать фотографии: "
+            "читать текст, разбирать схемы и решать задания.\n"
             "Команды:\n/start — начать\n/clear — очистить историю\n/help — помощь"
         )
         return
@@ -109,27 +179,37 @@ async def handle_update(update: dict):
         await send_message(chat_id, "История диалога очищена 🧹")
         return
 
-    if text.startswith("/"):
+    if text.startswith("/") and not photos and not document_is_image:
         await send_message(chat_id, "Неизвестная команда. Напиши /help.")
         return
 
     await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
     try:
-        answer = await ask_groq(user_id, text)
+        if photos or document_is_image:
+            file_id = photos[-1]["file_id"] if photos else document["file_id"]
+            image_bytes, mime_type = await download_telegram_file(file_id)
+            if len(image_bytes) > 20 * 1024 * 1024:
+                await send_message(chat_id, "Фото слишком большое. Отправь изображение размером до 20 МБ.")
+                return
+            answer = await ask_groq_about_image(user_id, text, image_bytes, mime_type)
+        else:
+            answer = await ask_groq(user_id, text)
         await send_message(chat_id, answer)
     except httpx.HTTPStatusError as exc:
-        log.exception("Groq API returned an error: %s", exc.response.text[:1000])
+        log.exception("AI API returned an error: %s", exc.response.text[:1500])
         status = exc.response.status_code
         if status == 429:
-            msg = "Сейчас достигнут бесплатный лимит запросов Groq. Подожди немного и попробуй снова."
+            msg = "Достигнут лимит запросов Groq. Подожди немного и попробуй снова."
         elif status in (401, 403):
             msg = "Не удалось авторизоваться в Groq. Проверь GROQ_API_KEY в Render."
+        elif status == 413:
+            msg = "Изображение слишком большое для модели. Отправь фото меньшего размера."
         else:
-            msg = "Groq временно не смог обработать запрос. Попробуй ещё раз чуть позже."
+            msg = "Не удалось обработать запрос или фото. Попробуй другое изображение чуть позже."
         await send_message(chat_id, msg)
     except Exception:
         log.exception("Unexpected error while processing message")
-        await send_message(chat_id, "Произошла ошибка. Попробуй отправить сообщение ещё раз.")
+        await send_message(chat_id, "Произошла ошибка при обработке. Попробуй ещё раз.")
 
 
 @app.on_event("startup")
