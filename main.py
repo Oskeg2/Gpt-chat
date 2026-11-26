@@ -11,7 +11,7 @@ log = logging.getLogger("telegram-groq-bot")
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+RENDER_EXTERNAL_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 SYSTEM_PROMPT = os.getenv(
@@ -215,7 +215,7 @@ async def handle_update(update: dict):
 @app.on_event("startup")
 async def configure_webhook():
     if not RENDER_EXTERNAL_URL:
-        log.warning("RENDER_EXTERNAL_URL is missing; webhook was not configured.")
+        log.error("WEBHOOK_URL and RENDER_EXTERNAL_URL are both missing; webhook was not configured.")
         return
 
     payload = {"url": f"{RENDER_EXTERNAL_URL}/telegram/webhook"}
