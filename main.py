@@ -276,6 +276,13 @@ async def handle_update(update: dict):
                 {"command": "limit", "description": "Показать остаток лимитов API"},
             ]
         })
+        await telegram_call("setChatMenuButton", {
+            "menu_button": {
+                "type": "web_app",
+                "text": "Открыть AI",
+                "web_app": {"url": "https://telegram-groq-ai-bot.onrender.com/app"},
+            }
+        })
         await send_message(
             chat_id,
             "Привет! 👋 Я твой AI-помощник.\n\n"
