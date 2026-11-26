@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -249,7 +249,8 @@ async def miniapp():
 @app.post("/api/miniapp/chat")
 async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_user)):
     if not can_make_request(user_id):
-        raise HTTPException(status_code=403 if account_info(user_id)["blocked"] else 429, detail="Доступ заблокирован." if account_info(user_id)["blocked"] else "Лимит токенов исчерпан.")
+        a = account_info(user_id)
+        raise HTTPException(status_code=403 if a["blocked"] else 429, detail="Доступ заблокирован." if a["blocked"] else "Лимит токенов исчерпан.")
     text = payload.text.strip()
     if payload.image_base64:
         try:
@@ -258,20 +259,70 @@ async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_
             raise HTTPException(status_code=400, detail="Не удалось прочитать изображение.")
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Изображение должно быть меньше 10 МБ.")
-        if not can_make_request(user_id):
-            raise HTTPException(status_code=429, detail=f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC.")
         answer, used_tokens = await ask_groq_about_image(user_id, text, image_bytes, payload.mime_type, payload.answer_mode)
         add_daily_tokens(user_id, used_tokens)
         model = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
-    else:
-        if not text:
-            raise HTTPException(status_code=400, detail="Напиши сообщение.")
-        if not can_make_request(user_id):
-            raise HTTPException(status_code=429, detail=f"Дневной лимит {DAILY_TOKEN_LIMIT} токенов исчерпан. Он обновится в 00:00 UTC.")
-        answer, used_tokens = await ask_groq(user_id, text, payload.answer_mode)
-        add_daily_tokens(user_id, used_tokens)
-        model = GROQ_MODEL
-    return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
+        return {"answer": answer, "limits": rate_limits.get(model, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
+    if not text:
+        raise HTTPException(status_code=400, detail="Напиши сообщение.")
+
+    async def stream_answer():
+        history = histories[user_id]
+        style_prompt = ("Отвечай кратко и по делу: сначала прямой ответ, затем только необходимое пояснение." if payload.answer_mode != "detailed" else "Дай подробный, структурированный ответ с объяснением шагов.")
+        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\\n\\n" + style_prompt}]
+        messages.extend(list(history)[-8:])
+        messages.append({"role": "user", "content": text})
+        answer_parts = []
+        used_tokens = 0
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
+                async with client.stream("POST", GROQ_API, headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                }, json={
+                    "model": GROQ_MODEL,
+                    "messages": messages,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                    "max_completion_tokens": 1024,
+                }) as response:
+                    response.raise_for_status()
+                    save_rate_limits(response, GROQ_MODEL)
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        raw = line[6:]
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        usage = chunk.get("usage")
+                        if usage:
+                            used_tokens = int(usage.get("total_tokens", 0))
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta", {}).get("content")
+                            if delta:
+                                answer_parts.append(delta)
+                                yield "data: " + json.dumps({"token": delta}, ensure_ascii=False) + "\\n\\n"
+            answer = "".join(answer_parts).strip()
+            if answer:
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": answer})
+            if used_tokens:
+                add_daily_tokens(user_id, used_tokens)
+            meta = {"done": True, "limits": rate_limits.get(GROQ_MODEL, {}), "daily_usage": daily_usage_payload(user_id), "is_admin": user_id in ADMIN_IDS}
+            yield "data: " + json.dumps(meta, ensure_ascii=False) + "\\n\\n"
+        except Exception as exc:
+            log.exception("Mini App streaming request failed")
+            yield "data: " + json.dumps({"error": "Не удалось получить ответ. Попробуй ещё раз."}, ensure_ascii=False) + "\\n\\n"
+
+    return StreamingResponse(stream_answer(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 
 @app.post("/api/miniapp/limits")
