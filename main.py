@@ -1,4 +1,20 @@
 import os
+import logging
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import time
+from urllib.parse import parse_qsl
+from collections import defaultdict, deque
+
+import httpx
+from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("telegram-groq-bot")
@@ -19,16 +35,6 @@ GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 
 app = FastAPI(title="Telegram Groq AI Bot")
 
-import base64
-import hashlib
-import hmac
-import json
-import time
-from urllib.parse import parse_qsl
-from fastapi import Header, HTTPException, Depends
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -100,12 +106,7 @@ async def miniapp_limits(user_id: int = Depends(miniapp_user)):
 async def miniapp_clear(user_id: int = Depends(miniapp_user)):
     histories.pop(user_id, None)
     return {"ok": True}
-import logging
-import asyncio
-from collections import defaultdict, deque
 
-import httpx
-from fastapi import FastAPI
 
 
 # История хранится в памяти процесса и очищается при перезапуске Render.
