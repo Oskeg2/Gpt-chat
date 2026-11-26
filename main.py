@@ -26,6 +26,8 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 RENDER_EXTERNAL_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+MODEL_OPTIONS = {"openai/gpt-oss-20b": "GPT-OSS 20B", "openai/gpt-oss-120b": "GPT-OSS 120B", "llama-3.3-70b-versatile": "Llama 3.3 70B", "llama-3.1-8b-instant": "Llama 3.1 8B", "qwen/qwen3.8-27b": "Qwen 3.8 27B"}
+FALLBACK_MODELS = [x.strip() for x in os.getenv("GROQ_FALLBACK_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile,llama-3.1-8b-instant,openai/gpt-oss-20b").split(",") if x.strip() in MODEL_OPTIONS]
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
@@ -53,6 +55,7 @@ def init_usage_db():
                 PRIMARY KEY (user_id, usage_date)
             )""")
             cur.execute("ALTER TABLE daily_usage ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT 'openai/gpt-oss-20b'")
             cur.execute("""CREATE TABLE IF NOT EXISTS user_accounts (
                 user_id BIGINT PRIMARY KEY,
                 bonus_tokens BIGINT NOT NULL DEFAULT 0,
@@ -87,9 +90,9 @@ def account_info(user_id: int) -> dict:
     with psycopg2.connect(DATABASE_URL) as db:
         with db.cursor() as cur:
             cur.execute("INSERT INTO user_accounts (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
-            cur.execute("SELECT bonus_tokens, daily_limit, is_blocked, is_unlimited FROM user_accounts WHERE user_id=%s", (user_id,))
+            cur.execute("SELECT bonus_tokens, daily_limit, is_blocked, is_unlimited, selected_model FROM user_accounts WHERE user_id=%s", (user_id,))
             row = cur.fetchone()
-    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3])}
+    return {"bonus": int(row[0]), "limit": int(row[1]), "blocked": bool(row[2]), "unlimited": bool(row[3]), "selected_model": row[4] if row[4] in MODEL_OPTIONS else GROQ_MODEL}
 
 def can_make_request(user_id: int) -> bool:
     a = account_info(user_id)
@@ -208,7 +211,7 @@ class MiniChatRequest(BaseModel):
     image_base64: str | None = None
     mime_type: str = "image/jpeg"
     answer_mode: str = "short"
-
+    model: str | None = None
 
 
 class AdminActionRequest(BaseModel):
@@ -246,11 +249,20 @@ async def miniapp():
     return FileResponse("static/index.html")
 
 
+@app.post("/api/miniapp/models")
+async def miniapp_models(user_id: int = Depends(miniapp_user)):
+    return {"models": [{"id": k, "name": v} for k, v in MODEL_OPTIONS.items()], "selected": account_info(user_id)["selected_model"]}
+
+
 @app.post("/api/miniapp/chat")
 async def miniapp_chat(payload: MiniChatRequest, user_id: int = Depends(miniapp_user)):
     if not can_make_request(user_id):
         a = account_info(user_id)
         raise HTTPException(status_code=403 if a["blocked"] else 429, detail="Доступ заблокирован." if a["blocked"] else "Лимит токенов исчерпан.")
+    selected_model = payload.model if payload.model in MODEL_OPTIONS else account_info(user_id)["selected_model"]
+    with psycopg2.connect(DATABASE_URL) as db:
+        with db.cursor() as cur:
+            cur.execute("UPDATE user_accounts SET selected_model=%s,updated_at=NOW() WHERE user_id=%s", (selected_model, user_id))
     text = payload.text.strip()
     if payload.image_base64:
         try:
