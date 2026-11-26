@@ -1,5 +1,24 @@
 import os
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("telegram-groq-bot")
+
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+RENDER_EXTERNAL_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT",
+    "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
+)
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
+
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
+
+app = FastAPI(title="Telegram Groq AI Bot")
+
 import base64
 import hashlib
 import hmac
@@ -88,24 +107,6 @@ from collections import defaultdict, deque
 import httpx
 from fastapi import FastAPI
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("telegram-groq-bot")
-
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-RENDER_EXTERNAL_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    "Ты полезный AI-ассистент. Отвечай на русском языке, если пользователь не попросил другой язык."
-)
-MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
-
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
-
-app = FastAPI(title="Telegram Groq AI Bot")
 
 # История хранится в памяти процесса и очищается при перезапуске Render.
 histories = defaultdict(lambda: deque(maxlen=MAX_HISTORY_MESSAGES))
