@@ -388,7 +388,11 @@ async def handle_update(update: dict):
         phrase in text.lower()
         for phrase in ("сколько осталось лимита", "сколько лимита осталось", "остаток лимита", "сколько осталось запросов")
     ):
-        await send_message(chat_id, format_rate_limits(GROQ_MODEL))
+        usage = daily_usage_payload(user_id)
+        await send_message(chat_id,
+            f"🪙 Твои токены за сегодня: {usage['used']} / {usage['limit']}\\n"
+            f"Осталось: {usage['remaining']} токенов\\n"
+            f"Сброс: 00:00 UTC\\n\\n" + format_rate_limits(GROQ_MODEL))
         return
 
     if text.startswith("/") and not photos and not document_is_image:
