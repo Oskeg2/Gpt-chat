@@ -97,7 +97,9 @@ def account_info(user_id: int) -> dict:
 
 def can_make_request(user_id: int) -> bool:
     a = account_info(user_id)
-    return not a["blocked"] and (a["unlimited"] or get_daily_usage(user_id) < a["limit"] + a["bonus"])
+    # Администраторы обходят только внутренний дневной лимит бота.
+    # Блокировка аккаунта и ограничения самого AI-провайдера сохраняются.
+    return not a["blocked"] and (user_id in ADMIN_IDS or a["unlimited"] or get_daily_usage(user_id) < a["limit"] + a["bonus"])
 
 def remember_user(user_id: int, message: dict):
     u = message.get("from", {})
@@ -142,9 +144,10 @@ def admin_change(admin_id: int, target_id: int, action: str, amount: int | None 
 def daily_usage_payload(user_id: int) -> dict:
     used = get_daily_usage(user_id)
     a = account_info(user_id)
-    remaining = -1 if a["unlimited"] else max(0, a["limit"] - used) + a["bonus"]
+    unlimited = a["unlimited"] or user_id in ADMIN_IDS
+    remaining = -1 if unlimited else max(0, a["limit"] - used) + a["bonus"]
     return {"limit": a["limit"], "used": used, "bonus": a["bonus"], "remaining": remaining,
-            "blocked": a["blocked"], "unlimited": a["unlimited"], "unit": "tokens", "resets_at": "00:00 UTC"}
+            "blocked": a["blocked"], "unlimited": unlimited, "unit": "tokens", "resets_at": "00:00 UTC"}
 
 
 def add_daily_tokens(user_id: int, tokens: int) -> int:
